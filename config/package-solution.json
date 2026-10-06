@@ -1,0 +1,40 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/spfx-build/package-solution.schema.json",
+  "solution": {
+    "name": "html-css-scripts-client-side-solution",
+    "id": "8564dd67-5557-4a81-974b-16eb0c029570",
+    "version": "1.0.0.0",
+    "includeClientSideAssets": true,
+    "skipFeatureDeployment": true,
+    "isDomainIsolated": false,
+    "developer": {
+      "name": "",
+      "websiteUrl": "",
+      "privacyUrl": "",
+      "termsOfUseUrl": "",
+      "mpnId": "Undefined-1.22.2"
+    },
+    "metadata": {
+      "shortDescription": {
+        "default": "html-css-scripts description"
+      },
+      "longDescription": {
+        "default": "html-css-scripts description"
+      },
+      "screenshotPaths": [],
+      "videoUrl": "",
+      "categories": []
+    },
+    "features": [
+      {
+        "title": "html-css-scripts Feature",
+        "description": "The feature that activates elements of the html-css-scripts solution.",
+        "id": "e8f376c4-83ca-45fd-88be-bab31f7529ca",
+        "version": "1.0.0.0"
+      }
+    ]
+  },
+  "paths": {
+    "zippedPackage": "solution/html-css-scripts.sppkg"
+  }
+}

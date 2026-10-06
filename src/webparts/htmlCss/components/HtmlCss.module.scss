@@ -1,0 +1,46 @@
+@import "~@fluentui/react/dist/sass/References.scss";
+
+.htmlCssWebPart {
+  position: relative;
+}
+
+.renderRoot {
+  min-height: 24px;
+}
+
+.emptyPlaceholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 8px;
+  padding: 32px 16px;
+  border: 1px dashed;
+  border-radius: 4px;
+  color: black;
+  text-align: center;
+  // font-family: $ms-font-family-base;
+
+  .icon {
+    font-size: 28px;
+  }
+
+  .title {
+    font-weight: 600;
+    color: black;
+  }
+
+  .subtitle {
+    font-size: 12px;
+  }
+}
+
+.errorBanner {
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  border-radius: 4px;
+  background: #fde7e9;
+  color: #a4262c;
+  // font-family: $ms-font-family-base;
+  font-size: 12px;
+}
