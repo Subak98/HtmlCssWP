@@ -3,9 +3,11 @@ import * as ReactDom from "react-dom";
 import { DisplayMode, Version } from "@microsoft/sp-core-library";
 import {
   type IPropertyPaneConfiguration,
+  type IPropertyPaneDropdownOption,
+  PropertyPaneButton,
+  PropertyPaneButtonType,
+  PropertyPaneDropdown,
   PropertyPaneLabel,
-  PropertyPaneTextField,
-  PropertyPaneToggle,
 } from "@microsoft/sp-property-pane";
 import { BaseClientSideWebPart } from "@microsoft/sp-webpart-base";
 import { IReadonlyTheme } from "@microsoft/sp-component-base";
@@ -16,29 +18,40 @@ import {
   IHtmlCssProps,
   IHtmlCssWebPartWebPartProps,
 } from "./components/IHtmlCssProps";
-import { PropertyFieldCodeEditor } from "./propertyPane/PropertyFieldCodeEditor";
-
-export interface IHtmlCssWebPartProps {
-  description: string;
-}
+import {
+  ILibraryInfo,
+  StyleLibraryService,
+} from "./services/StyleLibraryService";
 
 export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPartWebPartProps> {
-  private _instanceId: any;
+  private _instanceId: string = "";
+  private _service!: StyleLibraryService;
+  private _themeVars: { [name: string]: string } = {};
+  private _hasRendered: boolean = false;
 
-  private _isDarkTheme: boolean = false;
-  private _environmentMessage: string = "";
+  // ---- property pane state (loaded lazily when the pane opens) ----
+  private _libraries: ILibraryInfo[] = [];
+  private _libraryOptions: IPropertyPaneDropdownOption[] = [];
+  private _fileOptions: IPropertyPaneDropdownOption[] = [];
+  private _styleLibraryId: string = "";
+  /** Library whose files are currently in _fileOptions. */
+  private _activeLibraryId: string = "";
+  private _librariesLoaded: boolean = false;
+  private _loadingLibraries: boolean = false;
+  private _loadingFiles: boolean = false;
+  private _pickerMessage: string = "";
 
   public render(): void {
+    this._hasRendered = true;
+
     const element: React.ReactElement<IHtmlCssProps> = React.createElement(
       HtmlCss,
       {
-        html: this.properties.html,
-        css: this.properties.css,
-        enableCss: this.properties.enableCss !== false,
-        showPlaceholderWhenEmpty:
-          this.properties.showPlaceholderWhenEmpty !== false,
+        fileUrl: this.properties.fileUrl,
+        service: this._service,
         instanceId: this._instanceId,
         displayMode: this.displayMode as unknown as number,
+        themeVars: this._themeVars,
       },
     );
 
@@ -47,41 +60,35 @@ export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPar
 
   protected onInit(): Promise<void> {
     this._instanceId = `html-css-wp-${this.context.instanceId}`;
+    this._service = new StyleLibraryService(this.context);
     return super.onInit();
   }
-
-  /**
-   * Called by the custom property pane field when the user hits "Save"
-   * inside the HTML/CSS editor panel. Persists both properties in one
-   * go and triggers a re-render.
-   */
-  private _onCodeSaved = (html: string, css: string): void => {
-    this.properties.html = html;
-    this.properties.css = css;
-    this.render();
-    // Refresh the property pane so the field reflects the saved values
-    // (e.g. if the pane is re-opened without a full page reload).
-    this.context.propertyPane.refresh();
-  };
 
   protected onThemeChanged(currentTheme: IReadonlyTheme | undefined): void {
     if (!currentTheme) {
       return;
     }
 
-    this._isDarkTheme = !!currentTheme.isInverted;
     const { semanticColors } = currentTheme;
+    const vars: { [name: string]: string } = {};
 
     if (semanticColors) {
-      this.domElement.style.setProperty(
-        "--bodyText",
-        semanticColors.bodyText || null,
-      );
-      this.domElement.style.setProperty("--link", semanticColors.link || null);
-      this.domElement.style.setProperty(
-        "--linkHovered",
-        semanticColors.linkHovered || null,
-      );
+      if (semanticColors.bodyText) {
+        vars["--bodyText"] = semanticColors.bodyText;
+      }
+      if (semanticColors.link) {
+        vars["--link"] = semanticColors.link;
+      }
+      if (semanticColors.linkHovered) {
+        vars["--linkHovered"] = semanticColors.linkHovered;
+      }
+    }
+
+    // The content lives in a sandboxed iframe, so the theme colours are passed into it
+    // (CSS variables set on this.domElement would not cross the iframe boundary).
+    this._themeVars = vars;
+    if (this._hasRendered) {
+      this.render();
     }
   }
 
@@ -93,6 +100,114 @@ export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPar
     return Version.parse("1.0");
   }
 
+  // -------------------------------------------------------------------------
+  // Property pane
+  // -------------------------------------------------------------------------
+
+  /** Library to show as selected: the saved one, otherwise the Style Library by default. */
+  private _effectiveLibraryId(): string {
+    return this.properties.libraryId || this._styleLibraryId || "";
+  }
+
+  protected onPropertyPaneConfigurationStart(): void {
+    if (this._librariesLoaded) {
+      return;
+    }
+
+    this._loadingLibraries = true;
+    this._pickerMessage = strings.LoadingLibraries;
+    this.context.propertyPane.refresh();
+
+    this._service
+      .getLibraries()
+      .then((libraries) => {
+        this._libraries = libraries;
+        this._libraryOptions = libraries.map((l) => ({
+          key: l.id,
+          text: l.isStyleLibrary ? `${l.title} (default)` : l.title,
+        }));
+        const styleLibrary = libraries.filter((l) => l.isStyleLibrary)[0];
+        this._styleLibraryId = styleLibrary ? styleLibrary.id : "";
+        this._librariesLoaded = true;
+        this._pickerMessage = "";
+      })
+      .catch(() => {
+        this._pickerMessage = strings.LibrariesLoadError;
+      })
+      .then(() => {
+        this._loadingLibraries = false;
+        return this._loadFiles(this._effectiveLibraryId());
+      })
+      .then(() => this.context.propertyPane.refresh())
+      .catch(() => undefined);
+  }
+
+  protected onPropertyPaneFieldChanged(
+    propertyPath: string,
+    oldValue: any,
+    newValue: any,
+  ): void {
+    if (propertyPath === "libraryId" && newValue !== this._activeLibraryId) {
+      // A different library was picked: forget the previous file and list the new library's files.
+      this.properties.fileUrl = "";
+      this._fileOptions = [];
+      this._loadFiles(newValue as string)
+        .then(() => this.context.propertyPane.refresh())
+        .catch(() => undefined);
+    }
+
+    super.onPropertyPaneFieldChanged(propertyPath, oldValue, newValue);
+  }
+
+  private async _loadFiles(libraryId: string): Promise<void> {
+    this._activeLibraryId = libraryId;
+    this._fileOptions = [];
+
+    if (!libraryId) {
+      return;
+    }
+
+    const library: ILibraryInfo | undefined = this._libraries.filter(
+      (l) => l.id === libraryId,
+    )[0];
+
+    this._loadingFiles = true;
+    this._pickerMessage = strings.LoadingFiles;
+    this.context.propertyPane.refresh();
+
+    try {
+      const files = await this._service.getFiles(
+        libraryId,
+        library ? library.rootUrl : "",
+      );
+      if (this._activeLibraryId !== libraryId) {
+        return; // user already switched to another library
+      }
+      this._fileOptions = files.map((f) => ({ key: f.url, text: f.path }));
+      this._pickerMessage =
+        files.length === 0
+          ? strings.NoFilesFound
+          : strings.FilesFound.replace("{0}", String(files.length));
+    } catch (e) {
+      if (this._activeLibraryId === libraryId) {
+        this._pickerMessage = strings.FilesLoadError;
+      }
+    } finally {
+      if (this._activeLibraryId === libraryId) {
+        this._loadingFiles = false;
+      }
+    }
+  }
+
+  private _onRefreshClicked = (): void => {
+    this._loadFiles(this._effectiveLibraryId())
+      .then(() => {
+        this.context.propertyPane.refresh();
+        this.render(); // also re-read the selected file, e.g. after it was edited
+      })
+      .catch(() => undefined);
+  };
+
   protected getPropertyPaneConfiguration(): IPropertyPaneConfiguration {
     return {
       pages: [
@@ -102,35 +217,36 @@ export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPar
           },
           groups: [
             {
-              groupName: strings.ContentFieldsGroupName,
+              groupName: strings.SourceGroupName,
               groupFields: [
-                PropertyFieldCodeEditor("html", {
-                  label: strings.EditButtonLabel,
-                  html: this.properties.html,
-                  css: this.properties.css,
-                  onSave: this._onCodeSaved,
+                PropertyPaneDropdown("libraryId", {
+                  label: strings.LibraryFieldLabel,
+                  options: this._libraryOptions,
+                  selectedKey: this._effectiveLibraryId(),
+                  disabled:
+                    this._loadingLibraries || this._libraryOptions.length === 0,
                 }),
-                PropertyPaneLabel("html", {
-                  text:
-                    this.properties.html && this.properties.html.trim()
-                      ? `${this.properties.html.trim().length} characters of HTML saved.`
-                      : "No HTML saved yet.",
+                PropertyPaneDropdown("fileUrl", {
+                  label: strings.FileFieldLabel,
+                  options: this._fileOptions,
+                  selectedKey: this.properties.fileUrl,
+                  disabled:
+                    this._loadingLibraries ||
+                    this._loadingFiles ||
+                    this._fileOptions.length === 0,
+                }),
+                PropertyPaneLabel("pickerStatus", {
+                  text: this._pickerMessage,
+                }),
+                PropertyPaneButton("refreshFiles", {
+                  text: strings.RefreshButtonLabel,
+                  icon: "Refresh",
+                  buttonType: PropertyPaneButtonType.Normal,
+                  disabled: this._loadingLibraries || this._loadingFiles,
+                  onClick: this._onRefreshClicked,
                 }),
               ],
             },
-            // {
-            //   groupName: strings.BehaviorGroupName,
-            //   groupFields: [
-            //     PropertyPaneToggle("enableCss", {
-            //       label: strings.EnableCssFieldLabel,
-            //       checked: this.properties.enableCss !== false,
-            //     }),
-            //     PropertyPaneToggle("showPlaceholderWhenEmpty", {
-            //       label: strings.ShowPlaceholderFieldLabel,
-            //       checked: this.properties.showPlaceholderWhenEmpty !== false,
-            //     }),
-            //   ],
-            // },
           ],
         },
       ],

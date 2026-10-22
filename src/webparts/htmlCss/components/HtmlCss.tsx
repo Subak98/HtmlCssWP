@@ -1,154 +1,233 @@
 import * as React from "react";
 import styles from "./HtmlCss.module.scss";
 import type { IHtmlCssProps } from "./IHtmlCssProps";
-import { escape } from "@microsoft/sp-lodash-subset";
-import { Icon } from "@fluentui/react";
-interface IHtmlCssWebPartState {
-  hasRenderError: boolean;
-  errorMessage: string;
+import { Icon, Spinner, SpinnerSize } from "@fluentui/react";
+import * as strings from "HtmlCssWebPartStrings";
+import type {
+  IStyleFileContent,
+  ReadFailureKind,
+} from "../services/StyleLibraryService";
+import {
+  buildSandboxDocument,
+  HEIGHT_MESSAGE_TYPE,
+} from "../utils/buildSandboxDocument";
+
+type LoadStatus = "idle" | "loading" | "ready" | "error";
+
+interface IHtmlCssState {
+  status: LoadStatus;
+  content?: IStyleFileContent;
+  errorKind?: ReadFailureKind;
+  errorDetail?: string;
+  frameHeight: number;
+  /** True once the iframe has reported its real content height. */
+  measured: boolean;
 }
 
-/**
- * Wraps a CSS string so every rule is scoped under the instance's
- * unique root selector. This is a light-weight scoping approach
- * (no shadow DOM) that keeps custom CSS from leaking onto the rest
- * of the page, while still allowing normal cascading CSS authoring.
- */
+/** Height used until the iframe reports its real height (or forever, if it can't). */
+const FALLBACK_HEIGHT: number = 300;
+const MAX_FRAME_HEIGHT: number = 10000;
 
-function scopeCss(css: string, scopeSelector: string): string {
-  if (!css || !css.trim()) {
-    return "";
+function errorMessageFor(kind: ReadFailureKind | undefined): string {
+  switch (kind) {
+    case "format":
+      return strings.FormatErrorTitle;
+    case "notFound":
+      return strings.NotFoundError;
+    case "forbidden":
+      return strings.ForbiddenError;
+    case "tooLarge":
+      return strings.TooLargeError;
+    default:
+      return strings.GenericLoadError;
   }
-
-  // Strip HTML comments/script-ish content defensively; this is a
-  // property-pane-authored value (site owner/editor controlled), not
-  // arbitrary anonymous user input, but we still avoid obvious injection
-  // vectors like </style> breaking out of the tag.
-  const sanitized = css.replace(/<\/style>/gi, "");
-
-  // Very small "scoper": prefix each top-level selector group with the
-  // instance root. Handles the common cases (selectors separated by
-  // commas, rules separated by `}`) without pulling in a full CSS parser.
-  const ruleRegex = /([^{}]+)\{([^{}]*)\}/g;
-  let scoped = "";
-  let match: RegExpExecArray | null;
-
-  while ((match = ruleRegex.exec(sanitized)) !== null) {
-    const selectors = match[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .map((s) => {
-        // Leave @-rules (media queries, keyframes, font-face) untouched;
-        // they are handled at a coarser level below.
-        if (s.indexOf("@") === 0) {
-          return s;
-        }
-        return `${scopeSelector} ${s}`;
-      })
-      .join(", ");
-    scoped += `${selectors} {${match[2]}}\n`;
-  }
-
-  // Fallback: if the regex-based pass produced nothing (e.g. the author
-  // used @media / @keyframes blocks the simple regex can't split), just
-  // wrap the whole thing in a scoping @layer-less block via :where so the
-  // browser applies specificity sanely without us re-implementing a CSS parser.
-  if (!scoped.trim()) {
-    scoped = `${scopeSelector} { all: revert; }\n${sanitized}`;
-  }
-
-  return scoped;
 }
 
 export default class HtmlCss extends React.Component<
   IHtmlCssProps,
-  IHtmlCssWebPartState
+  IHtmlCssState
 > {
-  private _styleTag: HTMLStyleElement | undefined;
+  private _frameRef: React.RefObject<HTMLIFrameElement> =
+    React.createRef<HTMLIFrameElement>();
+  private _loadToken: number = 0;
+  private _unmounted: boolean = false;
+  private _srcDocKey: string = "";
+  private _srcDoc: string = "";
 
   constructor(props: IHtmlCssProps) {
     super(props);
-    this.state = { hasRenderError: false, errorMessage: "" };
+    this.state = {
+      status: "idle",
+      frameHeight: FALLBACK_HEIGHT,
+      measured: false,
+    };
   }
 
   public componentDidMount(): void {
-    this._applyCss();
+    window.addEventListener("message", this._onMessage);
+    this._load().catch(() => undefined);
   }
 
   public componentDidUpdate(prevProps: IHtmlCssProps): void {
-    if (
-      prevProps.css !== this.props.css ||
-      prevProps.enableCss !== this.props.enableCss
-    ) {
-      this._applyCss();
+    if (prevProps.fileUrl !== this.props.fileUrl) {
+      this._load().catch(() => undefined);
     }
   }
+
   public componentWillUnmount(): void {
-    this._removeCss();
+    this._unmounted = true;
+    window.removeEventListener("message", this._onMessage);
   }
 
   public render(): React.ReactElement<IHtmlCssProps> {
-    const { html, showPlaceholderWhenEmpty, displayMode, instanceId } =
-      this.props;
-    const isEditMode = displayMode === 2;
-    const isEmpty = !html || !html.trim();
+    const { displayMode, instanceId } = this.props;
+    const { status, content, errorKind, errorDetail, frameHeight, measured } =
+      this.state;
+    const isEditMode: boolean = displayMode === 2;
 
-    if (isEmpty && showPlaceholderWhenEmpty && isEditMode) {
-      return (
-        <div className={styles.htmlCssWebPart} id={instanceId}>
+    let body: React.ReactNode = null;
+
+    if (status === "idle") {
+      // Nothing selected yet: guide the author in edit mode, show nothing to readers.
+      if (isEditMode) {
+        body = (
           <div className={styles.emptyPlaceholder}>
             <Icon iconName="Code" className={styles.icon} />
-            <div className={styles.title}>No content yet</div>
+            <div className={styles.title}>
+              {strings.SelectFilePlaceholderTitle}
+            </div>
             <div className={styles.subtitle}>
-              Open the property pane and use &quot;Edit HTML / CSS&quot; to add
-              your markup and styles.
+              {strings.SelectFilePlaceholderText}
             </div>
           </div>
+        );
+      }
+    } else if (status === "loading") {
+      body = (
+        <Spinner size={SpinnerSize.medium} label={strings.LoadingContent} />
+      );
+    } else if (status === "error") {
+      body = (
+        <div className={styles.errorBanner} role="alert">
+          <div className={styles.errorTitle}>{errorMessageFor(errorKind)}</div>
+          {errorKind === "format" && (
+            <div className={styles.errorDetail}>{strings.FormatErrorHint}</div>
+          )}
+          {errorDetail && (
+            <div className={styles.errorDetail}>{errorDetail}</div>
+          )}
         </div>
+      );
+    } else if (status === "ready" && content) {
+      body = (
+        <iframe
+          ref={this._frameRef}
+          className={styles.frame}
+          title={strings.FrameTitle}
+          // allow-scripts WITHOUT allow-same-origin => opaque origin: the file's JS cannot touch the
+          // SharePoint page, cookies or tokens. Popups are allowed (and escape the sandbox) so that
+          // links open as normal pages in a new tab.
+          sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
+          referrerPolicy="no-referrer"
+          srcDoc={this._getSrcDoc(content)}
+          scrolling={measured ? "no" : "yes"}
+          style={{ height: frameHeight }}
+        />
       );
     }
 
     return (
       <div className={styles.htmlCssWebPart} id={instanceId}>
-        {this.state.hasRenderError && (
-          <div className={styles.errorBanner}>
-            There was a problem rendering the custom HTML:{" "}
-            {this.state.errorMessage}
-          </div>
-        )}
-        <div
-          className={styles.renderRoot}
-          // eslint-disable-next-line react/no-danger
-          dangerouslySetInnerHTML={{ __html: html || "" }}
-        />
+        {body}
       </div>
     );
   }
-  public componentDidCatch(error: Error): void {
-    this.setState({ hasRenderError: true, errorMessage: error.message });
+
+  private _getSrcDoc(content: IStyleFileContent): string {
+    const key: string = JSON.stringify([
+      content,
+      this.props.themeVars,
+      this.props.instanceId,
+    ]);
+    if (key !== this._srcDocKey) {
+      this._srcDoc = buildSandboxDocument({
+        content,
+        instanceId: this.props.instanceId,
+        themeVars: this.props.themeVars,
+      });
+      this._srcDocKey = key;
+    }
+    return this._srcDoc;
   }
 
-  private _applyCss(): void {
-    this._removeCss();
+  private async _load(): Promise<void> {
+    const { fileUrl, service } = this.props;
+    const token: number = ++this._loadToken;
 
-    if (!this.props.enableCss || !this.props.css || !this.props.css.trim()) {
+    if (!fileUrl) {
+      this.setState({
+        status: "idle",
+        content: undefined,
+        errorKind: undefined,
+        errorDetail: undefined,
+      });
       return;
     }
 
-    const scopeSelector = `#${this.props.instanceId}`;
-    const cssText = scopeCss(this.props.css, scopeSelector);
+    this.setState({
+      status: "loading",
+      measured: false,
+      frameHeight: FALLBACK_HEIGHT,
+    });
 
-    const styleTag = document.createElement("style");
-    styleTag.setAttribute("data-html-css-webpart", this.props.instanceId);
-    styleTag.innerHTML = cssText;
-    document.head.appendChild(styleTag);
-    this._styleTag = styleTag;
-  }
-  private _removeCss(): void {
-    if (this._styleTag && this._styleTag.parentNode) {
-      this._styleTag.parentNode.removeChild(this._styleTag);
+    const result = await service.readFile(fileUrl);
+    if (this._unmounted || token !== this._loadToken) {
+      return; // a newer selection superseded this request
     }
-    this._styleTag = undefined;
+
+    if (result.ok) {
+      this.setState({
+        status: "ready",
+        content: result.content,
+        errorKind: undefined,
+        errorDetail: undefined,
+        measured: false,
+        frameHeight: FALLBACK_HEIGHT,
+      });
+    } else {
+      this.setState({
+        status: "error",
+        content: undefined,
+        errorKind: result.kind,
+        errorDetail: result.detail,
+      });
+    }
   }
+
+  /** Receives the content height from the sandboxed iframe (it can't be measured from outside). */
+  private _onMessage = (ev: MessageEvent): void => {
+    const frame: HTMLIFrameElement | null = this._frameRef.current;
+    if (!frame || ev.source !== frame.contentWindow) {
+      return; // not from our iframe
+    }
+
+    const data: any = ev.data;
+    if (
+      !data ||
+      data.type !== HEIGHT_MESSAGE_TYPE ||
+      data.id !== this.props.instanceId
+    ) {
+      return;
+    }
+
+    const height: number = Number(data.height);
+    if (!isFinite(height) || height < 0) {
+      return;
+    }
+
+    const clamped: number = Math.min(Math.ceil(height), MAX_FRAME_HEIGHT);
+    if (clamped !== this.state.frameHeight || !this.state.measured) {
+      this.setState({ frameHeight: clamped, measured: true });
+    }
+  };
 }

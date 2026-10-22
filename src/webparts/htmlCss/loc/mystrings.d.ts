@@ -11,12 +11,28 @@ declare interface IHtmlCssWebPartStrings {
   AppOfficeEnvironment: string;
   AppOutlookEnvironment: string;
   UnknownEnvironment: string;
-  PropertyPaneDescription: string;
-  ContentFieldsGroupName: string;
-  BehaviorGroupName: string;
-  EditButtonLabel: string;
-  EnableCssFieldLabel: string;
-  ShowPlaceholderFieldLabel: string;
+
+  SourceGroupName: string;
+  LibraryFieldLabel: string;
+  FileFieldLabel: string;
+  RefreshButtonLabel: string;
+  LoadingLibraries: string;
+  LoadingFiles: string;
+  NoFilesFound: string;
+  FilesFound: string;
+  LibrariesLoadError: string;
+  FilesLoadError: string;
+
+  SelectFilePlaceholderTitle: string;
+  SelectFilePlaceholderText: string;
+  LoadingContent: string;
+  FrameTitle: string;
+  FormatErrorTitle: string;
+  FormatErrorHint: string;
+  NotFoundError: string;
+  ForbiddenError: string;
+  TooLargeError: string;
+  GenericLoadError: string;
 }
 
 declare module "HtmlCssWebPartStrings" {

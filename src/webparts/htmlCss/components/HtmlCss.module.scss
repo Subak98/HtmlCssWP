@@ -44,3 +44,17 @@
   // font-family: $ms-font-family-base;
   font-size: 12px;
 }
+
+.errorTitle {
+  font-weight: 600;
+}
+
+.errorDetail {
+  margin-top: 4px;
+}
+
+.frame {
+  display: block;
+  width: 100%;
+  border: 0;
+}

@@ -1,20 +1,21 @@
+import type { StyleLibraryService } from "../services/StyleLibraryService";
+
 export interface IHtmlCssProps {
-  html: string;
-  css: string;
-  enableCss: boolean;
-  showPlaceholderWhenEmpty: boolean;
-  /** Unique instance id used to scope the injected <style> block. */
+  /** Server-relative URL of the selected style file, e.g. /sites/hr/Style Library/banner.json */
+  fileUrl: string;
+  service: StyleLibraryService;
+  /** Unique instance id; also used to match the iframe's height messages to this web part. */
   instanceId: string;
-  /** True when the page/web part is in edit mode (Pages edit mode in SharePoint). */
+  /** SharePoint display mode: 1 = Read, 2 = Edit. */
   displayMode: number;
+  /** SharePoint theme colours, passed into the sandbox as CSS custom properties. */
+  themeVars: { [name: string]: string };
 }
+
+/** Properties persisted on the web part. Note: NO html/css/js is stored here any more. */
 export interface IHtmlCssWebPartWebPartProps {
-  /** Raw HTML markup entered by the editor. */
-  html: string;
-  /** Raw CSS entered by the editor. Scoped automatically to this instance. */
-  css: string;
-  /** Master switch to enable/disable the custom CSS injection. */
-  enableCss: boolean;
-  /** Show a friendly placeholder in edit mode when no HTML has been entered yet. */
-  showPlaceholderWhenEmpty: boolean;
+  /** Id (GUID) of the library chosen in the property pane. Empty = default to the Style Library. */
+  libraryId: string;
+  /** Server-relative URL of the selected style file. */
+  fileUrl: string;
 }
