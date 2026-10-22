@@ -1,154 +1,271 @@
 import * as React from "react";
 import styles from "./HtmlCss.module.scss";
 import type { IHtmlCssProps } from "./IHtmlCssProps";
-import { escape } from "@microsoft/sp-lodash-subset";
-import { Icon } from "@fluentui/react";
-interface IHtmlCssWebPartState {
-  hasRenderError: boolean;
-  errorMessage: string;
+import {
+  Icon,
+  MessageBar,
+  MessageBarType,
+  Spinner,
+  SpinnerSize,
+} from "@fluentui/react";
+import { StyleLibraryService } from "../services/StyleLibraryService";
+import { IParsedHtmlFile, parseHtmlFile } from "../utils/htmlFileParser";
+import { scopeCss } from "../utils/scopeCss";
+
+type ViewState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "error"; message: string }
+  | { status: "ready"; parsed: IParsedHtmlFile };
+
+async function fetchText(url: string): Promise<string> {
+  const res = await fetch(url, { credentials: "same-origin" });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}`);
+  }
+  return res.text();
+}
+
+function loadExternalScript(host: HTMLElement, src: string): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const el = document.createElement("script");
+    el.src = src;
+    el.onload = (): void => resolve();
+    el.onerror = (): void => resolve(); // a broken CDN link should not block the rest
+    host.appendChild(el);
+  });
 }
 
 /**
- * Wraps a CSS string so every rule is scoped under the instance's
- * unique root selector. This is a light-weight scoping approach
- * (no shadow DOM) that keeps custom CSS from leaking onto the rest
- * of the page, while still allowing normal cascading CSS authoring.
+ * Files authored as standalone pages often wait for DOMContentLoaded / load,
+ * which already fired for the SharePoint page. While an inline script runs we
+ * capture those listeners and call them right after it has executed.
  */
+function runWithReadyShim(run: () => void): void {
+  const queued: Array<{
+    target: Document | Window;
+    type: string;
+    listener: EventListenerOrEventListenerObject;
+  }> = [];
+  const restore: Array<() => void> = [];
 
-function scopeCss(css: string, scopeSelector: string): string {
-  if (!css || !css.trim()) {
-    return "";
+  const patch = (target: Document | Window, type: string): void => {
+    const original = target.addEventListener;
+    target.addEventListener = function (
+      t: string,
+      l: EventListenerOrEventListenerObject,
+      o?: boolean | AddEventListenerOptions,
+    ): void {
+      if (t === type) {
+        queued.push({ target, type, listener: l });
+        return;
+      }
+      original.call(target, t, l, o);
+    } as typeof target.addEventListener;
+    restore.push(() => {
+      target.addEventListener = original;
+    });
+  };
+
+  patch(document, "DOMContentLoaded");
+  patch(window, "load");
+  try {
+    run();
+  } finally {
+    restore.forEach((r) => r());
   }
 
-  // Strip HTML comments/script-ish content defensively; this is a
-  // property-pane-authored value (site owner/editor controlled), not
-  // arbitrary anonymous user input, but we still avoid obvious injection
-  // vectors like </style> breaking out of the tag.
-  const sanitized = css.replace(/<\/style>/gi, "");
-
-  // Very small "scoper": prefix each top-level selector group with the
-  // instance root. Handles the common cases (selectors separated by
-  // commas, rules separated by `}`) without pulling in a full CSS parser.
-  const ruleRegex = /([^{}]+)\{([^{}]*)\}/g;
-  let scoped = "";
-  let match: RegExpExecArray | null;
-
-  while ((match = ruleRegex.exec(sanitized)) !== null) {
-    const selectors = match[1]
-      .split(",")
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .map((s) => {
-        // Leave @-rules (media queries, keyframes, font-face) untouched;
-        // they are handled at a coarser level below.
-        if (s.indexOf("@") === 0) {
-          return s;
-        }
-        return `${scopeSelector} ${s}`;
-      })
-      .join(", ");
-    scoped += `${selectors} {${match[2]}}\n`;
-  }
-
-  // Fallback: if the regex-based pass produced nothing (e.g. the author
-  // used @media / @keyframes blocks the simple regex can't split), just
-  // wrap the whole thing in a scoping @layer-less block via :where so the
-  // browser applies specificity sanely without us re-implementing a CSS parser.
-  if (!scoped.trim()) {
-    scoped = `${scopeSelector} { all: revert; }\n${sanitized}`;
-  }
-
-  return scoped;
+  queued.forEach(({ target, type, listener }) => {
+    const evt = new Event(type);
+    if (typeof listener === "function") {
+      listener.call(target, evt);
+    } else {
+      listener.handleEvent(evt);
+    }
+  });
 }
 
-export default class HtmlCss extends React.Component<
-  IHtmlCssProps,
-  IHtmlCssWebPartState
-> {
-  private _styleTag: HTMLStyleElement | undefined;
-
-  constructor(props: IHtmlCssProps) {
-    super(props);
-    this.state = { hasRenderError: false, errorMessage: "" };
-  }
-
-  public componentDidMount(): void {
-    this._applyCss();
-  }
-
-  public componentDidUpdate(prevProps: IHtmlCssProps): void {
-    if (
-      prevProps.css !== this.props.css ||
-      prevProps.enableCss !== this.props.enableCss
-    ) {
-      this._applyCss();
+function runInlineScript(code: string): void {
+  // SharePoint's CSP blocks inline <script> elements but allows 'unsafe-eval',
+  // so inline code is run with an indirect (global-scope) eval.
+  // Wrapped in a block so top-level let/const don't clash when the same file
+  // runs twice on a page; `var` and function declarations still become global,
+  // so inline onclick="fn()" handlers keep working.
+  const globalEval = eval;
+  runWithReadyShim(() => {
+    try {
+      globalEval(`{\n${code}\n}`);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Error while running script from the selected file:", err);
     }
-  }
-  public componentWillUnmount(): void {
-    this._removeCss();
-  }
+  });
+}
 
-  public render(): React.ReactElement<IHtmlCssProps> {
-    const { html, showPlaceholderWhenEmpty, displayMode, instanceId } =
-      this.props;
-    const isEditMode = displayMode === 2;
-    const isEmpty = !html || !html.trim();
+const HtmlCss: React.FC<IHtmlCssProps> = (props) => {
+  const {
+    spHttpClient,
+    webUrl,
+    fileUrl,
+    showPlaceholderWhenEmpty,
+    instanceId,
+    isEditMode,
+  } = props;
 
-    if (isEmpty && showPlaceholderWhenEmpty && isEditMode) {
-      return (
-        <div className={styles.htmlCssWebPart} id={instanceId}>
-          <div className={styles.emptyPlaceholder}>
-            <Icon iconName="Code" className={styles.icon} />
-            <div className={styles.title}>No content yet</div>
-            <div className={styles.subtitle}>
-              Open the property pane and use &quot;Edit HTML / CSS&quot; to add
-              your markup and styles.
-            </div>
+  const [state, setState] = React.useState<ViewState>({ status: "idle" });
+  const scriptHostRef = React.useRef<HTMLDivElement>(null);
+
+  // 1) Fetch + validate whenever the selected file changes.
+  React.useEffect(() => {
+    if (!fileUrl) {
+      setState({ status: "idle" });
+      return undefined;
+    }
+
+    let cancelled = false;
+    const fileName = fileUrl.substring(fileUrl.lastIndexOf("/") + 1);
+    setState({ status: "loading" });
+
+    new StyleLibraryService(spHttpClient, webUrl)
+      .getFileContent(fileUrl)
+      .then((text) => {
+        if (cancelled) {
+          return;
+        }
+        const result = parseHtmlFile(text, window.location.origin + fileUrl);
+        setState(
+          result.ok
+            ? { status: "ready", parsed: result.file }
+            : {
+                status: "error",
+                message: `The selected file "${fileName}" is not in property format. It must contain HTML and CSS (JavaScript is optional). ${result.reason}`,
+              },
+        );
+      })
+      .catch((err: Error) => {
+        if (!cancelled) {
+          setState({
+            status: "error",
+            message: `Could not read "${fileName}": ${err.message}`,
+          });
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [fileUrl, webUrl, spHttpClient]);
+
+  // 2) Once the markup is in the DOM, inject the scoped CSS and run the scripts.
+  React.useEffect(() => {
+    const host = scriptHostRef.current;
+    if (state.status !== "ready" || !host) {
+      return undefined;
+    }
+
+    const { styles: sheets, scripts } = state.parsed;
+    const added: HTMLElement[] = [];
+    let cancelled = false;
+
+    const apply = async (): Promise<void> => {
+      // CSS: inline blocks as-is, linked sheets fetched so they can be scoped too.
+      const cssParts: string[] = [];
+      const unscopedLinks: string[] = [];
+      for (const s of sheets) {
+        if (s.text) {
+          cssParts.push(s.text);
+        } else if (s.href) {
+          try {
+            cssParts.push(await fetchText(s.href));
+          } catch {
+            unscopedLinks.push(s.href); // e.g. cross-origin without CORS
+          }
+        }
+      }
+      if (cancelled) {
+        return;
+      }
+
+      const styleTag = document.createElement("style");
+      styleTag.setAttribute("data-html-css-webpart", instanceId);
+      styleTag.textContent = cssParts
+        .map((c) => scopeCss(c, `#${instanceId}`))
+        .join("\n");
+      document.head.appendChild(styleTag);
+      added.push(styleTag);
+
+      unscopedLinks.forEach((href) => {
+        const link = document.createElement("link");
+        link.rel = "stylesheet";
+        link.href = href;
+        document.head.appendChild(link);
+        added.push(link);
+      });
+
+      // JS: in document order; external scripts finish loading before the next one runs.
+      for (const s of scripts) {
+        if (cancelled) {
+          return;
+        }
+        if (s.src) {
+          await loadExternalScript(host, s.src);
+        } else if (s.text) {
+          runInlineScript(s.text);
+        }
+      }
+    };
+
+    apply().catch((err: Error) => {
+      if (!cancelled) {
+        setState({
+          status: "error",
+          message: `There was a problem rendering the file: ${err.message}`,
+        });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      added.forEach((el) => el.parentNode && el.parentNode.removeChild(el));
+      host.innerHTML = ""; // removes the <script> elements we added
+    };
+  }, [state, instanceId]);
+
+  return (
+    <div className={styles.htmlCssWebPart} id={instanceId}>
+      {state.status === "loading" && (
+        <Spinner size={SpinnerSize.small} label="Loading..." />
+      )}
+
+      {state.status === "error" && (
+        <MessageBar messageBarType={MessageBarType.error} isMultiline>
+          {state.message}
+        </MessageBar>
+      )}
+
+      {state.status === "idle" && isEditMode && showPlaceholderWhenEmpty && (
+        <div className={styles.emptyPlaceholder}>
+          <Icon iconName="Code" className={styles.icon} />
+          <div className={styles.title}>No file selected</div>
+          <div className={styles.subtitle}>
+            Open the property pane, pick a library and choose the .html file to
+            render.
           </div>
         </div>
-      );
-    }
+      )}
 
-    return (
-      <div className={styles.htmlCssWebPart} id={instanceId}>
-        {this.state.hasRenderError && (
-          <div className={styles.errorBanner}>
-            There was a problem rendering the custom HTML:{" "}
-            {this.state.errorMessage}
-          </div>
-        )}
+      {state.status === "ready" && (
         <div
           className={styles.renderRoot}
           // eslint-disable-next-line react/no-danger
-          dangerouslySetInnerHTML={{ __html: html || "" }}
+          dangerouslySetInnerHTML={{ __html: state.parsed.bodyHtml }}
         />
-      </div>
-    );
-  }
-  public componentDidCatch(error: Error): void {
-    this.setState({ hasRenderError: true, errorMessage: error.message });
-  }
+      )}
 
-  private _applyCss(): void {
-    this._removeCss();
+      {/* Scripts are appended here, outside React-managed markup. */}
+      <div ref={scriptHostRef} style={{ display: "none" }} />
+    </div>
+  );
+};
 
-    if (!this.props.enableCss || !this.props.css || !this.props.css.trim()) {
-      return;
-    }
-
-    const scopeSelector = `#${this.props.instanceId}`;
-    const cssText = scopeCss(this.props.css, scopeSelector);
-
-    const styleTag = document.createElement("style");
-    styleTag.setAttribute("data-html-css-webpart", this.props.instanceId);
-    styleTag.innerHTML = cssText;
-    document.head.appendChild(styleTag);
-    this._styleTag = styleTag;
-  }
-  private _removeCss(): void {
-    if (this._styleTag && this._styleTag.parentNode) {
-      this._styleTag.parentNode.removeChild(this._styleTag);
-    }
-    this._styleTag = undefined;
-  }
-}
+export default HtmlCss;
