@@ -5,6 +5,7 @@ import {
   type IPropertyPaneConfiguration,
   type IPropertyPaneField,
   type IPropertyPaneDropdownOption,
+  PropertyPaneButton,
   PropertyPaneDropdown,
   PropertyPaneLabel,
 } from "@microsoft/sp-property-pane";
@@ -135,6 +136,33 @@ export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPar
         options: this._fileOptions,
         selectedKey: this.properties.fileUrl,
         disabled: this._paneLoading || this._fileOptions.length === 0,
+      }),
+      PropertyPaneButton("fileUrl", {
+        text: "Open HTML File",
+        disabled: this._paneLoading || !this.properties.fileUrl,
+        onClick: (selectedFileUrl: string) => {
+          const library = this._libraries.filter(
+            (item) => item.id === this.properties.libraryId,
+          )[0];
+          if (selectedFileUrl && library) {
+            const parentUrl = selectedFileUrl.substring(
+              0,
+              selectedFileUrl.lastIndexOf("/"),
+            );
+            const fileViewUrl = new URL(
+              `${library.rootUrl}/Forms/AllItems.aspx`,
+              window.location.origin,
+            );
+            fileViewUrl.searchParams.set("id", selectedFileUrl);
+            fileViewUrl.searchParams.set("parent", parentUrl);
+            window.open(
+              fileViewUrl.toString(),
+              "_blank",
+              "noopener,noreferrer",
+            );
+          }
+          return selectedFileUrl;
+        },
       }),
     ];
 

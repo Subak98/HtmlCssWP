@@ -1,4 +1,4 @@
-import { SPHttpClient } from '@microsoft/sp-http';
+import { SPHttpClient } from "@microsoft/sp-http";
 
 export interface ILibraryInfo {
   id: string;
@@ -14,8 +14,8 @@ export interface IFileInfo {
   displayName: string;
 }
 
-/** Set to true to list only .html / .htm files in the file dropdown. */
-const ONLY_HTML_FILES: boolean = false;
+/** List only .html files in the file dropdown. */
+const ONLY_HTML_FILES: boolean = true;
 
 interface IListRow {
   Id: string;
@@ -47,7 +47,9 @@ export class StyleLibraryService {
         id: l.Id,
         title: l.Title,
         rootUrl: l.RootFolder.ServerRelativeUrl,
-        isStyleLibrary: /\/style library$/i.test(l.RootFolder.ServerRelativeUrl),
+        isStyleLibrary: /\/style library$/i.test(
+          l.RootFolder.ServerRelativeUrl,
+        ),
         hidden: l.Hidden,
       }))
       .filter((l) => !l.hidden || l.isStyleLibrary)
@@ -75,14 +77,14 @@ export class StyleLibraryService {
       `?$select=FileRef,FSObjType&$top=1000`;
 
     while (next) {
-      const json: { value: IItemRow[]; 'odata.nextLink'?: string } =
+      const json: { value: IItemRow[]; "odata.nextLink"?: string } =
         await this._getJson(next);
 
       json.value.forEach((item) => {
         if (item.FSObjType !== 0) {
           return; // folder
         }
-        if (ONLY_HTML_FILES && !/\.html?$/i.test(item.FileRef)) {
+        if (ONLY_HTML_FILES && !/\.html$/i.test(item.FileRef)) {
           return;
         }
         files.push({
@@ -93,7 +95,7 @@ export class StyleLibraryService {
               : item.FileRef,
         });
       });
-      next = json['odata.nextLink'];
+      next = json["odata.nextLink"];
     }
 
     return files.sort((a, b) => a.displayName.localeCompare(b.displayName));

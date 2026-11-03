@@ -3,6 +3,7 @@ declare interface IHtmlCssWebPartStrings {
   ContentFieldsGroupName: string;
   LibraryFieldLabel: string;
   FileFieldLabel: string;
+  OpenFileButtonLabel: string;
   Loading: string;
   NoFilesFound: string;
   LoadError: string;

@@ -5,6 +5,7 @@ define([], function () {
     ContentFieldsGroupName: "Content",
     LibraryFieldLabel: "Library",
     FileFieldLabel: "File",
+    OpenFileButtonLabel: "Open selected file",
     Loading: "Loading...",
     NoFilesFound: "No files found in this library.",
     LoadError: "Could not load the library list or its files:",
