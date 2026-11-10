@@ -177,10 +177,13 @@ export default class HtmlCssWebPart extends BaseClientSideWebPart<IHtmlCssWebPar
     return {
       pages: [
         {
-          header: { description: strings.PropertyPaneDescription },
+          header: {
+            description:
+              "Displays custom content and layouts using HTML files stored in a SharePoint document library.",
+          },
           groups: [
             {
-              groupName: strings.ContentFieldsGroupName,
+              // groupName: strings.ContentFieldsGroupName,
               groupFields: fields,
             },
           ],
